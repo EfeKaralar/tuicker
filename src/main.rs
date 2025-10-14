@@ -1,9 +1,9 @@
-use core::error;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, EventStream, KeyCode},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
+use futures::StreamExt;
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
@@ -14,6 +14,8 @@ use reqwest::Response;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io;
+use tokio::select;
+use tokio::time::{Duration, Interval};
 
 #[derive(Debug, Clone)]
 struct Coin {
@@ -162,7 +164,7 @@ fn ui(frame: &mut Frame, coins: &[Coin]) {
     frame.render_widget(paragraph, main_area);
 
     // FOOTER
-    let help_message = Paragraph::new("Press 'q' to quit");
+    let help_message = Paragraph::new("q: quit\t r: refresh");
 
     frame.render_widget(help_message, footer_area);
 }
@@ -175,7 +177,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
     execute!(io::stdout(), EnterAlternateScreen)?;
 
+    // Start Event Stream render
+    let mut reader = EventStream::new();
+    // Initial refresh to fetch coins
     let mut coins = refresh_output().await?;
+    // Set up interval for refresh
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    interval.tick().await;
 
     // Event loop
     loop {
@@ -184,15 +192,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })?;
 
         // Poll for events with timeout
-        if event::poll(std::time::Duration::from_millis(100))? {
-            if let Event::Key(key) = event::read()? {
-                if key.code == KeyCode::Char('q') {
-                    break;
+        select! {
+            _ = interval.tick() => {
+            coins = refresh_output().await?;
+            }
+            event = reader.next() => {
+                if let Some(Ok(Event::Key(key))) = event {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Char('r') => coins = refresh_output().await?,
+                        _ => continue,
+                    }
                 }
             }
         }
     }
-
     // Clean up
     disable_raw_mode()?;
     execute!(io::stdout(), LeaveAlternateScreen)?;
